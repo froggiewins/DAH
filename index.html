@@ -122,6 +122,7 @@ button{cursor:pointer}
   <button class="btn" id="homeBtn" type="button" title="Back to 0, 0 (key: 0)">Origin</button>
   <button class="btn" id="wanderBtn" type="button" title="Jump to a random piece (key: R)">Wander</button>
   <button class="btn primary" id="addBtn" type="button">Hang your picture</button>
+  <button class="btn" id="acctBtn" type="button">Sign in</button>
   <input id="file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
 </header>
 
@@ -165,7 +166,9 @@ const gctx=grid.getContext("2d"), octx=over.getContext("2d"), mctx=mini.getConte
 const cam = {x:0,y:0,z:.6};
 const org = {x:0,y:0}; // pictures are positioned relative to this, so they stay sharp however far out you travel
 let W=innerWidth, H=innerHeight, dpr=1, css={}, cursor=null;
-let sb=null, device="", me={owner:null,admin:false,known:false}, hereNow=0, setupMissing=false;
+let sb=null, me={owner:null,username:"",admin:false,banned:false,reason:""}, hereNow=0, setupMissing=false, backendOld=false, pendingFiles=null;
+const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const WANTS_ADMIN=location.hash==="#admin";
 let canHang=false, indexReady=false, indexFailed=false, connecting=true;
 const CFG=window.DAH_CONFIG||{}, SB_URL=CFG.supabaseUrl||"", SB_KEY=CFG.supabaseKey||"", BUCKET="dah";
 const regions=new Map(), pieces=new Map(), els=new Map(), marks=new Map(), subs=new Map();
@@ -276,7 +279,7 @@ function zoomAt(factor,sx=W/2,sy=H/2){flying++;const [wx,wy]=toWorld(sx,sy),z=cl
 let hashT;
 const enc=n=>{const r=Math.round(n);return r<0?"n"+(-r):""+r};
 const dec=s=>s[0]==="n"?-Number(s.slice(1)):Number(s);
-function saveHash(){clearTimeout(hashT);hashT=setTimeout(()=>{try{history.replaceState(null,"",`#at-${enc(cam.x)}-${enc(cam.y)}-u${Math.round(cam.z*1e6)}`)}catch{}},500)}
+function saveHash(){clearTimeout(hashT);hashT=setTimeout(()=>{if(/access_token|error_description|type=/.test(location.hash))return;try{history.replaceState(null,"",`#at-${enc(cam.x)}-${enc(cam.y)}-u${Math.round(cam.z*1e6)}`)}catch{}},500)}
 function readHash(){const m=/^#at-(n?\d+)-(n?\d+)(?:-(z|u)(\d+))?$/.exec(location.hash);return m?{x:dec(m[1]),y:dec(m[2]),z:m[4]?Number(m[4])/(m[3]==="u"?1e6:1e3):null}:null}
 addEventListener("hashchange",()=>{const h=readHash();if(h&&(Math.abs(h.x-cam.x)>1||Math.abs(h.y-cam.y)>1))fly(h.x,h.y,h.z||cam.z)});
 
@@ -342,7 +345,7 @@ function refreshStatus(){
   if(setupMissing)return setStatus("The wall is still being set up.");
   if(indexFailed)return setStatus("Can't reach the wall right now. Retrying…");
   if(connecting)return;
-  const parts=["Connected"];
+  const parts=[me.banned?"Account banned":me.owner?`Signed in as ${me.username}`:"Sign in to post"];
   if(hereNow>1)parts.push(`${hereNow} here now`);
   setStatus(parts.join(" · "));
 }
@@ -358,7 +361,7 @@ async function loadIndex(){
   if(error)return failed(error);
   regions.clear();for(const d of data)addIndex(d);
   for(const [id,e] of marks)if(!regions.has(id)){e.remove();marks.delete(id)}
-  indexReady=true;indexFailed=false;setupMissing=false;connecting=false;
+  indexReady=true;indexFailed=false;setupMissing=backendOld;connecting=false;
   refreshStatus();updateEmpty();refreshAdd();draw();
 }
 async function loadCount(){
@@ -383,7 +386,7 @@ async function loadView(force){
 let refreshT;
 function soon(){clearTimeout(refreshT);refreshT=setTimeout(()=>{loadIndex();loadCount()},400)}
 function subscribeLive(){
-  const ch=sb.channel("dah-wall",{config:{presence:{key:me.owner||"visitor"}}});
+  const ch=sb.channel("dah-wall",{config:{presence:{key:Math.random().toString(36).slice(2)}}});
   ch.on("postgres_changes",{event:"*",schema:"public",table:"dah_pieces"},e=>{
     if(e.eventType==="DELETE"){const id=e.old&&e.old.id;if(id){pieces.delete(id);removeEl(id);regions.delete(id);const m=marks.get(id);if(m){m.remove();marks.delete(id)}if(selected===id)closePanel()}}
     else{const p=clean(e.new);if(p){const isNew=e.eventType==="INSERT"&&p.owner!==me.owner;pieces.set(p.id,p);addIndex(e.new);if(isNew)toast(`New picture at ${plain(p.x,p.y)}: ${p.title}`)}}
@@ -409,9 +412,11 @@ function refreshCount(){
   $("count").textContent=total.toLocaleString("en-US");$("countLabel").textContent=total===1?"image":"images";
 }
 function refreshAdd(){
-  const b=$("addBtn"),ok=canHang&&!setupMissing;
+  const b=$("addBtn"),ok=!!sb&&!setupMissing&&!me.banned;
   b.disabled=!ok;
+  b.textContent=me.banned?"Account banned":"Hang your picture";
   b.title=ok?"":noHangReason();
+  $("acctBtn").textContent=me.owner?me.username:"Sign in";
   refreshStatus();updateEmpty();
 }
 function updateEmpty(){
@@ -419,11 +424,11 @@ function updateEmpty(){
   const known=regions.size>0||pieces.size>0;
   const show=!known&&!placing&&(indexReady||setupMissing||!sb);
   box.hidden=!show;
-  $("emptyAdd").hidden=!canHang||setupMissing;
+  $("emptyAdd").hidden=!sb||setupMissing||me.banned;
   $("emptyText").textContent=setupMissing
     ?"D.A.H. is almost ready. Its database is still being set up, so check back soon."
     :!sb?"The wall couldn't load. Check your connection and reload the page."
-    :"Everyone shares this one wall. Pick a free spot and hang your picture.";
+    :"Everyone shares this one wall. Create a free account, pick a spot and hang your picture.";
 }
 
 /* ---------- moving around ---------- */
@@ -499,7 +504,7 @@ function openDetail(id){
   if(!p.dl)kids.push(el("div",{class:"note",text:"The artist hasn't turned on downloads for this picture."}));
   if(mine){
     const box=el("input",{id:"dlToggle",type:"checkbox",checked:p.dl});
-    box.onchange=async()=>{box.disabled=true;try{const {error}=await sb.rpc("dah_set_download",{p_id:p.id,p_device:device,p_dl:box.checked});if(error)throw error;const q=pieces.get(p.id);if(q)q.dl=box.checked;openDetail(p.id)}catch{box.checked=!box.checked;box.disabled=false;toast("That setting didn't save. Try again.")}};
+    box.onchange=async()=>{box.disabled=true;try{const {error}=await sb.rpc("dah_set_download",{p_id:p.id,p_dl:box.checked});if(error)throw error;const q=pieces.get(p.id);if(q)q.dl=box.checked;openDetail(p.id)}catch{box.checked=!box.checked;box.disabled=false;toast("That setting didn't save. Try again.")}};
     kids.push(el("label",{class:"check"},box,el("span",{text:"Let people download this picture"})));
   }
   if(mine||me.admin){
@@ -510,16 +515,33 @@ function openDetail(id){
   if(!mine&&!me.admin){
     const rp=el("button",{class:"btn",type:"button",text:"Report this picture"});
     rp.onclick=async()=>{
+      if(!me.owner){openAuth("signin","Sign in to report a picture.");return}
       if(!rp.dataset.sure){rp.dataset.sure="1";rp.textContent="Confirm report";return}
       rp.disabled=true;
-      const {error}=await sb.rpc("dah_report",{p_id:p.id,p_device:device});
-      if(error){rp.disabled=false;toast("The report didn't send. Try again.");return}
+      const {error}=await sb.rpc("dah_report",{p_id:p.id});
+      if(error){rp.disabled=false;toast(/DAH:banned/.test(error.message)?"Banned accounts can't send reports.":"The report didn't send. Try again.");return}
       rp.textContent="Reported";toast("Thanks. Pictures reported by several people are hidden automatically.");
     };
     kids.push(el("div",{class:"row"},rp));
   }
+  if(me.admin&&!mine&&UUID.test(p.owner||"")){
+    const reason=el("input",{id:"banReason",maxLength:200,placeholder:"Reason (optional)"});
+    const wipe=el("input",{id:"banWipe",type:"checkbox"});
+    const ban=el("button",{class:"btn danger",type:"button",text:"Ban this account"});
+    ban.onclick=async()=>{
+      if(!ban.dataset.sure){ban.dataset.sure="1";ban.textContent=`Confirm: ban ${p.artist||"this account"}`;return}
+      ban.disabled=true;
+      const {data,error}=await sb.rpc("dah_admin_ban",{p_user:p.owner,p_reason:reason.value,p_remove:wipe.checked});
+      if(error){ban.disabled=false;toast(/DAH:banadmin/.test(error.message)?"Admins can't be banned. Remove their admin access first.":"The ban didn't go through. Try again.");return}
+      await removeFiles(data);
+      if(wipe.checked){for(const q of [...pieces.values()])if(q.owner===p.owner){pieces.delete(q.id);removeEl(q.id);regions.delete(q.id)}closePanel();soon();draw()}
+      toast(wipe.checked?"Account banned and its pictures removed.":"Account banned.");
+    };
+    kids.push(el("label",{class:"field"},el("span",{class:"eyebrow",text:"Moderation"}),reason),el("label",{class:"check"},wipe,el("span",{text:"Also remove all their pictures"})),el("div",{class:"row"},ban));
+  }
   panel.replaceChildren(...kids);panel.hidden=false;close.focus();
 }
+async function removeFiles(paths){if(Array.isArray(paths)&&paths.length)try{await sb.storage.from(BUCKET).remove(paths)}catch{}}
 async function download(p){
   const b=$("dlBtn");if(b)b.disabled=true;
   try{
@@ -531,48 +553,141 @@ async function download(p){
   }catch{toast("The download didn't start. Try again.")}
   if(b)b.disabled=false;
 }
-async function loadAdmin(){
-  const {data,error}=await sb.rpc("dah_is_admin",{p_device:device});
-  me.known=!error;me.admin=data===true;
+/* ---------- accounts ---------- */
+async function refreshMe(session){
+  const had=me.owner;
+  if(!session){me={owner:null,username:"",admin:false,banned:false,reason:""};canHang=false}
+  else{
+    const {data,error}=await sb.rpc("dah_me");
+    if(error){if(error.code==="PGRST202"||error.code==="42883"){backendOld=true;setupMissing=true}return refreshAdd()}
+    me={owner:data.id,username:data.username,admin:data.admin===true,banned:data.banned===true,reason:data.reason||""};
+    canHang=!me.banned;
+  }
+  if(had&&!me.owner&&placing)cancelPlacing();
+  refreshAdd();draw();
+  if(me.owner&&pendingFiles){const f=pendingFiles;pendingFiles=null;closePanel();takeFiles(f.files,f.at)}
 }
-// Open the site with #admin on the end of its address to set this browser up as an admin.
+function authMessage(e){
+  const m=(e&&e.message)||"";
+  if(e&&e.status===429||/rate limit/i.test(m))return "Too many attempts or sign-up emails right now. Try again in an hour.";
+  if(/invalid login/i.test(m))return "That email or password is wrong.";
+  if(/not confirmed/i.test(m))return "Confirm your email first, using the link we sent you.";
+  if(/already registered/i.test(m))return "That email already has an account. Sign in instead.";
+  if(/password/i.test(m))return m;
+  return m||"That didn't work. Check your connection and try again.";
+}
+function openAuth(mode="signin",note=""){
+  if(!sb)return;
+  const titles={signin:"Sign in",signup:"Create your account",reset:"Reset your password",newpass:"Choose a new password"};
+  const field=(label,input)=>el("label",{class:"field"},el("span",{class:"eyebrow",text:label}),input);
+  const msg=el("p",{id:"authMsg",class:"note",text:note,hidden:!note});
+  const email=el("input",{id:"authEmail",type:"email",required:true,autocomplete:"email"});
+  const pass=el("input",{id:"authPass",type:"password",required:true,minLength:8,autocomplete:mode==="signin"?"current-password":"new-password"});
+  const user=el("input",{id:"authUser",required:true,minLength:3,maxLength:24,pattern:"[A-Za-z0-9_]+",autocomplete:"username",title:"3 to 24 letters, numbers or underscores"});
+  const go=el("button",{class:"btn primary",type:"submit",text:{signin:"Sign in",signup:"Create account",reset:"Send reset link",newpass:"Save password"}[mode]});
+  const fields=mode==="signin"?[field("Email",email),field("Password",pass)]
+    :mode==="signup"?[field("Username",user),field("Email",email),field("Password (at least 8 characters)",pass)]
+    :mode==="reset"?[field("Email",email)]:[field("New password (at least 8 characters)",pass)];
+  const form=el("form",{id:"authForm",style:"display:flex;flex-direction:column;gap:12px"},...fields,el("div",{class:"row"},go));
+  const say=(t,bad)=>{msg.textContent=t;msg.hidden=false;msg.className=bad?"warn":"note"};
+  form.addEventListener("submit",async e=>{
+    e.preventDefault();go.disabled=true;
+    try{
+      const back=location.origin+location.pathname;
+      if(mode==="signin"){const {error}=await sb.auth.signInWithPassword({email:email.value.trim(),password:pass.value});if(error)throw error;if(!pendingFiles)closePanel();toast("Signed in.")}
+      else if(mode==="signup"){
+        const name=user.value.trim();
+        const free=await sb.rpc("dah_username_free",{p_name:name});
+        if(!free.error&&free.data===false){say("That username is taken. Try another.",true);go.disabled=false;return}
+        const {data,error}=await sb.auth.signUp({email:email.value.trim(),password:pass.value,options:{data:{username:name},emailRedirectTo:back}});
+        if(error)throw error;
+        if(data.session){if(!pendingFiles)closePanel();toast("Account created.")}else{form.hidden=true;say("Check your email and open the link to finish creating your account.")}
+      }
+      else if(mode==="reset"){const {error}=await sb.auth.resetPasswordForEmail(email.value.trim(),{redirectTo:back});if(error)throw error;form.hidden=true;say("If that email has an account, a reset link is on its way.")}
+      else{const {error}=await sb.auth.updateUser({password:pass.value});if(error)throw error;closePanel();toast("Password updated.")}
+    }catch(err){say(authMessage(err),true)}
+    go.disabled=false;
+  });
+  const link=(text,m)=>el("button",{class:"btn",type:"button",text,onclick:()=>openAuth(m,msg.hidden?"":note)});
+  const kids=[el("div",{class:"eyebrow",text:"Account"}),el("h2",{text:titles[mode]}),msg,form];
+  if(mode==="signin")kids.push(el("div",{class:"row"},link("Create an account","signup"),link("Forgot password","reset")));
+  if(mode==="signup"||mode==="reset")kids.push(el("div",{class:"row"},link("I have an account","signin")));
+  kids.push(el("div",{class:"row"},el("button",{class:"btn",type:"button",text:"Close",onclick:()=>{pendingFiles=null;closePanel()}})));
+  selected=null;panel.replaceChildren(...kids);panel.hidden=false;(fields[0].querySelector("input")).focus();
+}
+function openAccount(){
+  const kids=[el("div",{class:"eyebrow",text:me.admin?"Account · Admin":"Account"}),el("h2",{text:me.username})];
+  if(me.banned)kids.push(el("p",{class:"warn",text:`This account is banned, so it can't post or report.${me.reason?` Reason: ${me.reason}`:""}`}));
+  const row=el("div",{class:"row"});
+  if(me.admin)row.append(el("button",{class:"btn primary",type:"button",text:"Admin tools",onclick:openAdmin}));
+  row.append(el("button",{class:"btn",type:"button",text:"Sign out",onclick:async()=>{await sb.auth.signOut().catch(()=>{});closePanel();toast("Signed out.")}}),el("button",{class:"btn",type:"button",text:"Close",onclick:closePanel}));
+  kids.push(row);selected=null;panel.replaceChildren(...kids);panel.hidden=false;
+}
+$("acctBtn").onclick=()=>{if(!sb)return;me.owner?openAccount():openAuth("signin")};
+// Open the site with #admin on the end of its address to reach the admin tools.
 async function openAdmin(){
-  if(!sb||!me.owner)return;
-  await loadAdmin();
-  const line=`insert into public.dah_admins (device_hash) values ('${me.owner}') on conflict do nothing;`;
-  const code=el("textarea",{id:"adminLine",rows:5,readOnly:true,value:line,style:"font:12px var(--mono);width:100%;box-sizing:border-box;background:var(--paper);border:1px solid var(--line-2);padding:7px"});
-  const kids=[el("div",{class:"eyebrow",text:"Admin"}),el("h2",{text:me.admin?"This browser is an admin":"Make this browser an admin"})];
-  if(me.admin)kids.push(el("p",{text:"You can remove any picture. Select it on the wall and choose Take it down."}));
-  else if(!me.known)kids.push(el("p",{class:"warn",text:"Run the latest supabase.sql in Supabase first, then reload this page."}));
-  else kids.push(el("p",{text:"Copy this line, paste it into the Supabase SQL Editor and run it, then reload this page."}),code,
-    el("div",{class:"row"},el("button",{class:"btn primary",type:"button",text:"Copy",onclick:()=>{code.select();copy(line,"Copied. Paste it into the Supabase SQL Editor.")}})));
-  kids.push(el("p",{class:"note",text:"Admin access belongs to this browser. Clearing its site data or using another browser means setting it up again."}),
-    el("div",{class:"row"},el("button",{class:"btn",type:"button",text:"Close",onclick:closePanel})));
-  selected=null;panel.replaceChildren(...kids);panel.hidden=false;
+  if(!sb)return;
+  if(!me.owner){openAuth("signin","Sign in to the account you want to use as an admin.");return}
+  const kids=[el("div",{class:"eyebrow",text:"Admin"}),el("h2",{text:me.admin?"Admin tools":"Make this account an admin"})];
+  const close=el("div",{class:"row"},el("button",{class:"btn",type:"button",text:"Close",onclick:closePanel}));
+  selected=null;
+  if(!me.admin){
+    const line=`insert into public.dah_account_admins (user_id) values ('${me.owner}') on conflict do nothing;`;
+    const code=el("textarea",{id:"adminLine",rows:5,readOnly:true,value:line,style:"font:12px var(--mono);width:100%;box-sizing:border-box;background:var(--paper);border:1px solid var(--line-2);padding:7px"});
+    kids.push(el("p",{text:"Copy this line, paste it into the Supabase SQL Editor and run it, then reload this page."}),code,
+      el("div",{class:"row"},el("button",{class:"btn primary",type:"button",text:"Copy",onclick:()=>{code.select();copy(line,"Copied. Paste it into the Supabase SQL Editor.")}})),close);
+    panel.replaceChildren(...kids);panel.hidden=false;return;
+  }
+  panel.replaceChildren(...kids,el("p",{class:"note",text:"Loading…"}));panel.hidden=false;
+  const {data,error}=await sb.rpc("dah_admin_queue");
+  if(error){panel.replaceChildren(...kids,el("p",{class:"warn",text:"The admin tools couldn't load. Try again."}),close);return}
+  const hidden=el("div",{style:"display:flex;flex-direction:column;gap:12px"});
+  for(const h of data.hidden){
+    const p=clean({...h.piece,id:h.id});if(!p)continue;
+    const act=keep=>async()=>{
+      const r=await sb.rpc("dah_admin_review",{p_id:h.id,p_keep:keep});
+      if(r.error){toast("That didn't go through. Try again.");return}
+      await removeFiles(r.data.paths);soon();if(keep)loadView(true);
+      toast(keep?"Picture restored.":r.data.banned?"Picture removed, and the account was banned automatically.":"Picture removed.");openAdmin();
+    };
+    hidden.append(el("div",{style:"display:flex;flex-direction:column;gap:6px"},el("img",{class:"thumb",alt:p.title,src:blob(p.img)}),
+      el("p",{text:`${p.title}${p.artist?` by ${p.artist}`:""} · ${plain(p.x,p.y)}`}),
+      el("div",{class:"row"},el("button",{class:"btn",type:"button",text:"Restore",onclick:act(true)}),el("button",{class:"btn danger",type:"button",text:"Remove",onclick:act(false)}))));
+  }
+  const bans=el("div",{style:"display:flex;flex-direction:column;gap:10px"});
+  for(const b of data.bans){
+    bans.append(el("div",{class:"row",style:"align-items:center;justify-content:space-between"},
+      el("span",{style:"min-width:0;overflow-wrap:anywhere",text:`${b.username}${b.automatic?" (automatic)":""}${b.reason?`: ${b.reason}`:""}`}),
+      el("button",{class:"btn",type:"button",text:"Unban",onclick:async()=>{const r=await sb.rpc("dah_admin_unban",{p_user:b.user_id});if(r.error){toast("That didn't go through. Try again.");return}toast(`${b.username} unbanned.`);openAdmin()}})));
+  }
+  panel.replaceChildren(...kids,
+    el("div",{class:"eyebrow",text:`Hidden by reports · ${data.hidden.length}`}),data.hidden.length?hidden:el("p",{class:"note",text:"Nothing waiting for review."}),
+    el("div",{class:"eyebrow",text:`Banned accounts · ${data.bans.length}`}),data.bans.length?bans:el("p",{class:"note",text:"No banned accounts."}),close);
 }
 addEventListener("hashchange",()=>{if(location.hash==="#admin")openAdmin()});
 async function takeDown(p){
   try{
-    const {data,error}=await sb.rpc("dah_take_down",{p_id:p.id,p_device:device});
+    const {data,error}=await sb.rpc("dah_take_down",{p_id:p.id});
     if(error)throw error;
-    if(Array.isArray(data)&&data.length)await sb.storage.from(BUCKET).remove(data).catch(()=>{});
+    await removeFiles(data.paths);
     pieces.delete(p.id);removeEl(p.id);regions.delete(p.id);
-    closePanel();soon();draw();toast("Taken down.");
+    closePanel();soon();draw();toast(data.banned?"Taken down, and the account was banned automatically.":"Taken down.");
   }catch{toast("That didn't go through. Check your connection and try again.")}
 }
 
 /* ---------- hanging a new piece ---------- */
-$("addBtn").onclick=$("emptyAdd").onclick=()=>{if(!canHang){toast(noHangReason());return}$("file").click()};
-function noHangReason(){return setupMissing?"The wall is still being set up.":"The wall couldn't load. Reload the page and try again."}
+$("addBtn").onclick=$("emptyAdd").onclick=()=>{if(sb&&!setupMissing&&!me.banned&&!me.owner){openAuth("signin","Sign in or create an account to hang a picture.");return}if(!canHang){toast(noHangReason());return}$("file").click()};
+function noHangReason(){return me.banned?"This account is banned, so it can't post.":setupMissing?"The wall is still being set up.":"The wall couldn't load. Reload the page and try again."}
 $("file").onchange=e=>{takeFiles([...e.target.files]);e.target.value=""};
 addEventListener("paste",e=>{const f=[...(e.clipboardData?.files||[])].filter(x=>x.type.startsWith("image/"));if(f.length&&!e.target.closest?.("input,textarea")){e.preventDefault();takeFiles(f)}});
 let dragDepth=0;
 const hasFiles=e=>[...(e.dataTransfer?.types||[])].includes("Files");
-addEventListener("dragenter",e=>{if(hasFiles(e)){dragDepth++;$("dropveil").hidden=!canHang}});
+addEventListener("dragenter",e=>{if(hasFiles(e)){dragDepth++;$("dropveil").hidden=!sb||setupMissing||me.banned}});
 addEventListener("dragleave",e=>{if(hasFiles(e)&&--dragDepth<=0){dragDepth=0;$("dropveil").hidden=true}});
 addEventListener("dragover",e=>{if(hasFiles(e))e.preventDefault()});
 addEventListener("drop",e=>{if(!hasFiles(e))return;e.preventDefault();dragDepth=0;$("dropveil").hidden=true;takeFiles([...e.dataTransfer.files],toWorld(e.clientX,e.clientY))});
 function takeFiles(files,at){
+  if(sb&&!setupMissing&&!me.banned&&!me.owner){pendingFiles={files,at};openAuth("signin","Sign in or create an account to hang your picture.");return}
   if(!canHang){toast(noHangReason());return}
   const ok=files.filter(f=>TYPES.has(f.type)&&f.size<=30*1024*1024);
   if(ok.length<files.length)toast("Some files were skipped. Use PNG, JPEG, GIF or WebP up to 30 MB.");
@@ -622,7 +737,6 @@ function findFree(){
 }
 function buildPlacePanel(){
   const title=el("input",{id:"pt",maxLength:120,placeholder:"Untitled",value:placing.file.name.replace(/\.[a-z0-9]+$/i,"").replace(/[_-]+/g," ").slice(0,120)});
-  const artist=el("input",{id:"pa",maxLength:80,value:store.get("artlas.artist"),placeholder:"Your name or handle"});
   const note=el("textarea",{id:"pn",maxLength:600,rows:2,placeholder:"Optional"});
   const x=el("input",{id:"px",type:"number",step:10,value:placing.x}),y=el("input",{id:"py",type:"number",step:10,value:placing.y});
   const size=el("input",{id:"ps",type:"range",min:10,max:100,value:60});
@@ -637,7 +751,7 @@ function buildPlacePanel(){
   const dl=el("input",{id:"pd",type:"checkbox"});
   const dlRow=el("label",{class:"check"},dl,el("span",{text:"Let people download this picture"}));
   const go=el("button",{id:"hang",class:"btn primary",type:"button",text:"Hang"});
-  go.onclick=()=>hang(title.value.trim(),artist.value.trim(),note.value.trim(),dl.checked);
+  go.onclick=()=>hang(title.value.trim(),note.value.trim(),dl.checked);
   const warn=el("div",{id:"pw",class:"warn",hidden:true},document.createTextNode("Another piece is already here. "),el("button",{class:"btn",type:"button",text:"Find a free spot",onclick:findFree,style:"margin-top:6px"}));
   const cancel=el("button",{class:"btn",type:"button",text:queue.length?"Skip":"Cancel",onclick:cancelPlacing});
   panel.replaceChildren(
@@ -646,7 +760,7 @@ function buildPlacePanel(){
     el("p",{class:"note",text:"Drag it on the map, or type exact coordinates. It can't cover anyone else's art."}),
     el("div",{class:"two"},field("x",x),field("y",y)),warn,
     el("label",{class:"field"},sizeLabel,size),
-    field("Title",title),field("Artist",artist),field("Note",note),dlRow,
+    el("p",{class:"note",text:`Posting as ${me.username}`}),field("Title",title),field("Note",note),dlRow,
     el("div",{id:"pp",class:"note",hidden:true}),
     el("div",{class:"row"},go,cancel));
   panel.hidden=false;setGhost(placing.x,placing.y);title.focus();title.select();
@@ -678,7 +792,8 @@ async function prepare(P){
 function hangError(e){
   if(e&&e.dah)return e.dah;
   const m=(e&&e.message)||"";
-  if(m.includes("DAH:limit"))return "This wall's upload limit is still switched on. Try again later.";
+  if(m.includes("DAH:banned")){sb.auth.getSession().then(r=>refreshMe(r.data.session));return "This account is banned, so it can't post."}
+  if(m.includes("DAH:signin")||/permission denied/i.test(m))return "Your sign-in has expired. Sign in again and try once more.";
   if(m.includes("DAH:overlap"))return "Someone else's art is already here, or someone is hanging a picture here right now. Move yours and try again.";
   if(m.includes("DAH:slow"))return "Too many attempts from this network. Wait an hour and try again.";
   if(m.includes("DAH:busy"))return "The wall is very busy right now. Try again soon.";
@@ -687,16 +802,15 @@ function hangError(e){
   if(/exceeded|too large|maximum/i.test(m))return "That image is too large. Export a smaller one and try again.";
   return "The upload didn't go through. Check your connection and try again.";
 }
-async function hang(title,artist,note,dl){
+async function hang(title,note,dl){
   const P=placing;if(!P||P.busy||P.clash)return;
   P.busy=true;const go=$("hang"),info=$("pp");go.disabled=true;go.textContent="Uploading…";info.hidden=false;info.textContent="Preparing your image…";
-  store.set("artlas.artist",artist);
   const done=msg=>{P.busy=false;info.textContent=msg;if(placing===P){setGhost(P.x,P.y);go.disabled=P.clash;go.textContent=`Hang at ${plain(P.x,P.y)}`}};
   try{
     const {main,thumb}=await prepare(P);
     info.textContent="Claiming your spot…";
     const x=P.x,y=P.y,w=gw(),h=gh();
-    const c=await sb.rpc("dah_claim",{p_device:device,p_x:x,p_y:y,p_w:w,p_h:h,p_img_ext:EXT[main.type]||"png",p_thumb_ext:thumb?EXT[thumb.type]:null,p_title:title,p_artist:artist,p_note:note,p_dl:dl});
+    const c=await sb.rpc("dah_claim",{p_x:x,p_y:y,p_w:w,p_h:h,p_img_ext:EXT[main.type]||"png",p_thumb_ext:thumb?EXT[thumb.type]:null,p_title:title,p_note:note,p_dl:dl});
     if(c.error)throw c.error;
     const store_=sb.storage.from(BUCKET);
     info.textContent="Uploading your image…";
@@ -704,7 +818,7 @@ async function hang(title,artist,note,dl){
     if(thumb){const r=await store_.upload(c.data.thumb,thumb,opts(thumb));if(r.error)throw r.error}
     const r=await store_.upload(c.data.img,main,opts(main));if(r.error)throw r.error;
     info.textContent="Hanging it on the wall…";
-    const pub=await sb.rpc("dah_publish",{p_claim:c.data.claim,p_device:device});
+    const pub=await sb.rpc("dah_publish",{p_claim:c.data.claim});
     if(pub.error)throw pub.error;
     const p=clean(pub.data);if(p){pieces.set(p.id,p);addIndex(pub.data)}
     if(placing===P){P.el.remove();URL.revokeObjectURL(P.url);placing=null;closePanel()}
@@ -725,19 +839,23 @@ resize();moveTo(cam.x,cam.y,cam.z);
 updateEmpty();
 (async()=>{
   try{
-    let saved=store.get("dah.device");
-    if(!/^[0-9a-f]{64}$/.test(saved)){saved=[...crypto.getRandomValues(new Uint8Array(32))].map(b=>b.toString(16).padStart(2,"0")).join("");store.set("dah.device",saved)}
-    device=saved;
-    const hash=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(device));
-    me.owner=[...new Uint8Array(hash)].map(b=>b.toString(16).padStart(2,"0")).join("");
     if(!SB_URL||!SB_KEY){setupMissing=true;connecting=false;updateEmpty();refreshAdd();return}
-    sb=supabase.createClient(SB_URL,SB_KEY,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false},realtime:{params:{eventsPerSecond:2}}});
-    canHang=true;
+    sb=supabase.createClient(SB_URL,SB_KEY,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true,storageKey:"dah-auth"},realtime:{params:{eventsPerSecond:2}}});
   }catch{connecting=false;updateEmpty();refreshAdd();setStatus("The wall couldn't load. Reload the page.");return}
   refreshAdd();
-  const wantsAdmin=location.hash==="#admin";
-  await Promise.all([loadIndex(),loadCount(),loadAdmin()]);
-  if(wantsAdmin)openAdmin();
+  const linkError=/error_description=([^&]+)/.exec(location.hash);
+  if(linkError)toast("That email link has expired or was already used. Try again.");
+  sb.auth.onAuthStateChange((event,session)=>{
+    // Supabase asks for other calls to wait until this callback has finished.
+    setTimeout(()=>{
+      if(event==="TOKEN_REFRESHED")return;
+      refreshMe(session);
+      if(event==="PASSWORD_RECOVERY")openAuth("newpass");
+    },0);
+  });
+  const {data:{session}}=await sb.auth.getSession();
+  await Promise.all([loadIndex(),loadCount(),refreshMe(session)]);
+  if(WANTS_ADMIN)openAdmin();
   subscribeLive();syncSubs();
   setInterval(refreshAdd,30000);
   setInterval(()=>{if(indexFailed||setupMissing)loadIndex()},15000);
