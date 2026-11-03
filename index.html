@@ -165,7 +165,7 @@ const gctx=grid.getContext("2d"), octx=over.getContext("2d"), mctx=mini.getConte
 const cam = {x:0,y:0,z:.6};
 const org = {x:0,y:0}; // pictures are positioned relative to this, so they stay sharp however far out you travel
 let W=innerWidth, H=innerHeight, dpr=1, css={}, cursor=null;
-let sb=null, device="", me={owner:null}, hereNow=0, setupMissing=false;
+let sb=null, device="", me={owner:null,admin:false,known:false}, hereNow=0, setupMissing=false;
 let canHang=false, indexReady=false, indexFailed=false, connecting=true;
 const CFG=window.DAH_CONFIG||{}, SB_URL=CFG.supabaseUrl||"", SB_KEY=CFG.supabaseKey||"", BUCKET="dah";
 const regions=new Map(), pieces=new Map(), els=new Map(), marks=new Map(), subs=new Map();
@@ -489,7 +489,7 @@ function openDetail(id){
   const close=el("button",{class:"btn",type:"button",text:"Close",onclick:closePanel});
   const cp=el("button",{class:"btn",type:"button",text:"Copy coordinates",onclick:()=>copy(plain(p.x,p.y),`Copied ${plain(p.x,p.y)}. Paste it into Go to.`)});
   const fit=el("button",{class:"btn",type:"button",text:"Fit to screen",onclick:()=>{const z=clamp(Math.min((W-420)/p.w,(H-120)/p.h),.05,MAX_Z);fly(p.x,p.y,W>700?z:Math.min(W/p.w,H/p.h)*.8)}});
-  const kids=[el("div",{class:"eyebrow",text:"On the wall"}),el("h2",{text:p.title}),thumb,el("div",{class:"coords",text:pair(p.x,p.y)})];
+  const kids=[el("div",{class:"eyebrow",text:me.admin?"On the wall · Admin":"On the wall"}),el("h2",{text:p.title}),thumb,el("div",{class:"coords",text:pair(p.x,p.y)})];
   if(p.artist)kids.push(el("p",{text:`By ${p.artist}`}));
   if(p.note)kids.push(el("p",{text:p.note}));
   if(p.at)kids.push(el("div",{class:"note",text:`Hung ${new Date(p.at).toLocaleDateString(undefined,{year:"numeric",month:"short",day:"numeric"})} · ${Math.round(p.w)} × ${Math.round(p.h)} units`}));
@@ -502,12 +502,12 @@ function openDetail(id){
     box.onchange=async()=>{box.disabled=true;try{const {error}=await sb.rpc("dah_set_download",{p_id:p.id,p_device:device,p_dl:box.checked});if(error)throw error;const q=pieces.get(p.id);if(q)q.dl=box.checked;openDetail(p.id)}catch{box.checked=!box.checked;box.disabled=false;toast("That setting didn't save. Try again.")}};
     kids.push(el("label",{class:"check"},box,el("span",{text:"Let people download this picture"})));
   }
-  if(mine){
+  if(mine||me.admin){
     const rm=el("button",{class:"btn danger",type:"button",text:"Take it down"});
     rm.onclick=()=>{if(rm.dataset.sure){rm.disabled=true;takeDown(p)}else{rm.dataset.sure="1";rm.textContent="Confirm: delete for everyone"}};
     kids.push(el("div",{class:"row"},rm));
   }
-  if(!mine){
+  if(!mine&&!me.admin){
     const rp=el("button",{class:"btn",type:"button",text:"Report this picture"});
     rp.onclick=async()=>{
       if(!rp.dataset.sure){rp.dataset.sure="1";rp.textContent="Confirm report";return}
@@ -531,6 +531,26 @@ async function download(p){
   }catch{toast("The download didn't start. Try again.")}
   if(b)b.disabled=false;
 }
+async function loadAdmin(){
+  const {data,error}=await sb.rpc("dah_is_admin",{p_device:device});
+  me.known=!error;me.admin=data===true;
+}
+// Open the site with #admin on the end of its address to set this browser up as an admin.
+async function openAdmin(){
+  if(!sb||!me.owner)return;
+  await loadAdmin();
+  const line=`insert into public.dah_admins (device_hash) values ('${me.owner}') on conflict do nothing;`;
+  const code=el("textarea",{id:"adminLine",rows:5,readOnly:true,value:line,style:"font:12px var(--mono);width:100%;box-sizing:border-box;background:var(--paper);border:1px solid var(--line-2);padding:7px"});
+  const kids=[el("div",{class:"eyebrow",text:"Admin"}),el("h2",{text:me.admin?"This browser is an admin":"Make this browser an admin"})];
+  if(me.admin)kids.push(el("p",{text:"You can remove any picture. Select it on the wall and choose Take it down."}));
+  else if(!me.known)kids.push(el("p",{class:"warn",text:"Run the latest supabase.sql in Supabase first, then reload this page."}));
+  else kids.push(el("p",{text:"Copy this line, paste it into the Supabase SQL Editor and run it, then reload this page."}),code,
+    el("div",{class:"row"},el("button",{class:"btn primary",type:"button",text:"Copy",onclick:()=>{code.select();copy(line,"Copied. Paste it into the Supabase SQL Editor.")}})));
+  kids.push(el("p",{class:"note",text:"Admin access belongs to this browser. Clearing its site data or using another browser means setting it up again."}),
+    el("div",{class:"row"},el("button",{class:"btn",type:"button",text:"Close",onclick:closePanel})));
+  selected=null;panel.replaceChildren(...kids);panel.hidden=false;
+}
+addEventListener("hashchange",()=>{if(location.hash==="#admin")openAdmin()});
 async function takeDown(p){
   try{
     const {data,error}=await sb.rpc("dah_take_down",{p_id:p.id,p_device:device});
@@ -715,7 +735,9 @@ updateEmpty();
     canHang=true;
   }catch{connecting=false;updateEmpty();refreshAdd();setStatus("The wall couldn't load. Reload the page.");return}
   refreshAdd();
-  await Promise.all([loadIndex(),loadCount()]);
+  const wantsAdmin=location.hash==="#admin";
+  await Promise.all([loadIndex(),loadCount(),loadAdmin()]);
+  if(wantsAdmin)openAdmin();
   subscribeLive();syncSubs();
   setInterval(refreshAdd,30000);
   setInterval(()=>{if(indexFailed||setupMissing)loadIndex()},15000);

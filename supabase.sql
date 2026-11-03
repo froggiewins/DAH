@@ -12,6 +12,8 @@
 --   See auto-hidden:    select * from public.dah_hidden order by hidden_at desc;
 --   Restore one:        select public.dah_restore('...');
 --   Pictures reach dah_hidden after reports from 3 different networks.
+--   Make a browser an admin: open the site with #admin on the end of its address and follow the steps.
+--   Remove an admin:    delete from public.dah_admins where device_hash = '...';
 
 create table if not exists public.dah_pieces (
   id uuid primary key,
@@ -68,6 +70,12 @@ create table if not exists public.dah_reports (
   primary key (piece_id, device_hash)
 );
 alter table public.dah_reports enable row level security;
+
+create table if not exists public.dah_admins (
+  device_hash text primary key,
+  created_at timestamptz not null default now()
+);
+alter table public.dah_admins enable row level security;
 
 create table if not exists public.dah_trash (
   path text primary key,
@@ -183,12 +191,19 @@ create or replace function public.dah_take_down(p_id uuid, p_device text) return
 language plpgsql security definer set search_path = '' as $$
 declare dh text := public.dah_device(p_device); r public.dah_pieces; paths text[];
 begin
-  delete from public.dah_pieces where id = p_id and owner = dh returning * into r;
+  delete from public.dah_pieces where id = p_id
+    and (owner = dh or exists (select 1 from public.dah_admins a where a.device_hash = dh))
+    returning * into r;
   if not found then raise exception 'DAH:notyours'; end if;
   paths := case when r.img = r.thumb then array[r.img] else array[r.img, r.thumb] end;
   insert into public.dah_trash (path) select unnest(paths) on conflict do nothing;
   return paths;
 end $$;
+
+create or replace function public.dah_is_admin(p_device text) returns boolean
+language sql stable security definer set search_path = '' as $$
+  select exists (select 1 from public.dah_admins a where a.device_hash = public.dah_device(p_device))
+$$;
 
 create or replace function public.dah_set_download(p_id uuid, p_device text, p_dl boolean) returns void
 language plpgsql security definer set search_path = '' as $$
@@ -226,11 +241,11 @@ end $$;
 
 revoke all on function public.dah_hash(text), public.dah_device(text), public.dah_ip(),
   public.dah_restore(uuid) from public, anon, authenticated;
-revoke all on function public.dah_upload_ok(text), public.dah_trash_ok(text),
+revoke all on function public.dah_is_admin(text), public.dah_upload_ok(text), public.dah_trash_ok(text),
   public.dah_claim(text, double precision, double precision, double precision, double precision, text, text, text, text, text, boolean),
   public.dah_publish(uuid, text), public.dah_take_down(uuid, text),
   public.dah_set_download(uuid, text, boolean), public.dah_report(uuid, text) from public;
-grant execute on function public.dah_upload_ok(text), public.dah_trash_ok(text),
+grant execute on function public.dah_is_admin(text), public.dah_upload_ok(text), public.dah_trash_ok(text),
   public.dah_claim(text, double precision, double precision, double precision, double precision, text, text, text, text, text, boolean),
   public.dah_publish(uuid, text), public.dah_take_down(uuid, text),
   public.dah_set_download(uuid, text, boolean), public.dah_report(uuid, text) to anon, authenticated;
