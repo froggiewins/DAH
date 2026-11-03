@@ -1,6 +1,6 @@
 # D.A.H. (Digital Art Hub)
 
-One endless shared wall of art with a coordinate system. Anyone can hang one picture a day, pictures can't overlap, and a live counter tracks the total.
+One endless shared wall of art with a coordinate system. Anyone can hang pictures, they can't overlap, and a live counter tracks the total.
 
 ## Setup
 

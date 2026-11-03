@@ -3,8 +3,8 @@
 --
 -- Visitors have no accounts. Each browser keeps a random secret ("device") and every rule
 -- below is enforced here on the server, so changing the web page can't get around them:
---   * one picture per browser every 24 hours
---   * at most 3 pictures per network every 24 hours (only a hash of the IP is kept, for 2 days)
+--   * at most 8 upload attempts per network per hour, to slow floods
+--     (only a hash of the IP is kept, for 2 days)
 --   * no picture can overlap another
 --
 -- Moderating, in the SQL editor:
@@ -103,23 +103,9 @@ begin
   return public.dah_hash('dah-network:' || coalesce(nullif(trim(ip), ''), 'unknown'));
 end $$;
 
--- Seconds until this browser and network can hang another picture. 0 means now.
-create or replace function public.dah_wait_for(p_device_hash text, p_ip_hash text) returns integer
-language sql stable security definer set search_path = '' as $$
-  select greatest(0,
-    coalesce((select ceil(extract(epoch from (max(c.created_at) + interval '24 hours' - now())))::int
-      from public.dah_claims c
-      where c.device_hash = p_device_hash and c.published and c.created_at > now() - interval '24 hours'), 0),
-    coalesce((select ceil(extract(epoch from (r.created_at + interval '24 hours' - now())))::int
-      from (select c.created_at from public.dah_claims c
-            where c.ip_hash = p_ip_hash and c.published and c.created_at > now() - interval '24 hours'
-            order by c.created_at desc offset 2 limit 1) r), 0))
-$$;
-
-create or replace function public.dah_status(p_device text) returns integer
-language sql stable security definer set search_path = '' as $$
-  select public.dah_wait_for(public.dah_device(p_device), public.dah_ip())
-$$;
+-- Removes the old daily limit when this file is run over an earlier version.
+drop function if exists public.dah_status(text);
+drop function if exists public.dah_wait_for(text, text);
 
 create or replace function public.dah_claim(
   p_device text, p_x double precision, p_y double precision, p_w double precision, p_h double precision,
@@ -127,7 +113,7 @@ create or replace function public.dah_claim(
 ) returns json
 language plpgsql security definer set search_path = '' as $$
 declare dh text := public.dah_device(p_device); ip text := public.dah_ip();
-  wait_s integer; cid uuid := gen_random_uuid(); img text; thumb text;
+  cid uuid := gen_random_uuid(); img text; thumb text;
 begin
   if p_x is null or p_y is null or abs(p_x) > 9e15 or abs(p_y) > 9e15
      or p_w is null or p_h is null or p_w < 8 or p_w > 2000 or p_h < 8 or p_h > 2000
@@ -139,8 +125,6 @@ begin
   perform pg_advisory_xact_lock(727001);
   delete from public.dah_claims where created_at < now() - interval '2 days';
   delete from public.dah_trash where created_at < now() - interval '2 days';
-  wait_s := public.dah_wait_for(dh, ip);
-  if wait_s > 0 then raise exception 'DAH:limit:%', wait_s; end if;
   if (select count(*) from public.dah_claims where ip_hash = ip and created_at > now() - interval '1 hour') >= 8 then
     raise exception 'DAH:slow';
   end if;
@@ -195,7 +179,6 @@ begin
   return to_json(r);
 end $$;
 
--- Taking a picture down deliberately doesn't refund the day's hang.
 create or replace function public.dah_take_down(p_id uuid, p_device text) returns text[]
 language plpgsql security definer set search_path = '' as $$
 declare dh text := public.dah_device(p_device); r public.dah_pieces; paths text[];
@@ -242,12 +225,12 @@ begin
 end $$;
 
 revoke all on function public.dah_hash(text), public.dah_device(text), public.dah_ip(),
-  public.dah_wait_for(text, text), public.dah_restore(uuid) from public, anon, authenticated;
-revoke all on function public.dah_status(text), public.dah_upload_ok(text), public.dah_trash_ok(text),
+  public.dah_restore(uuid) from public, anon, authenticated;
+revoke all on function public.dah_upload_ok(text), public.dah_trash_ok(text),
   public.dah_claim(text, double precision, double precision, double precision, double precision, text, text, text, text, text, boolean),
   public.dah_publish(uuid, text), public.dah_take_down(uuid, text),
   public.dah_set_download(uuid, text, boolean), public.dah_report(uuid, text) from public;
-grant execute on function public.dah_status(text), public.dah_upload_ok(text), public.dah_trash_ok(text),
+grant execute on function public.dah_upload_ok(text), public.dah_trash_ok(text),
   public.dah_claim(text, double precision, double precision, double precision, double precision, text, text, text, text, text, boolean),
   public.dah_publish(uuid, text), public.dah_take_down(uuid, text),
   public.dah_set_download(uuid, text, boolean), public.dah_report(uuid, text) to anon, authenticated;

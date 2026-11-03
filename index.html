@@ -122,7 +122,7 @@ button{cursor:pointer}
   <button class="btn" id="homeBtn" type="button" title="Back to 0, 0 (key: 0)">Origin</button>
   <button class="btn" id="wanderBtn" type="button" title="Jump to a random piece (key: R)">Wander</button>
   <button class="btn primary" id="addBtn" type="button">Hang your picture</button>
-  <input id="file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+  <input id="file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
 </header>
 
 <div id="hud" class="float" aria-live="off">
@@ -155,7 +155,7 @@ button{cursor:pointer}
 "use strict";
 const $ = id => document.getElementById(id);
 const REGION = 2048, MAX_SIDE = 2000, THUMB = 480, MAX_DIM = 2560, LIMIT = 9e15; // about as far as exact whole-number coordinates go
-const DAY = 864e5, GAP = 12;
+const GAP = 12;
 const MIN_Z = .00001, MAX_Z = 6, MAX_SUBS = 48, MAX_WANTED = 40;
 const TYPES = new Set(["image/png","image/jpeg","image/gif","image/webp"]);
 const ASSET_PATH = /^[0-9a-f-]{36}\/(full|thumb)\.(png|jpg|gif|webp)$/;
@@ -169,7 +169,7 @@ let sb=null, device="", me={owner:null}, hereNow=0, setupMissing=false;
 let canHang=false, indexReady=false, indexFailed=false, connecting=true;
 const CFG=window.DAH_CONFIG||{}, SB_URL=CFG.supabaseUrl||"", SB_KEY=CFG.supabaseKey||"", BUCKET="dah";
 const regions=new Map(), pieces=new Map(), els=new Map(), marks=new Map(), subs=new Map();
-let total=null, nextAt=0, peers=[], placing=null, queue=[], selected=null;
+let total=null, peers=[], placing=null, queue=[], selected=null;
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 /* ---------- small helpers ---------- */
@@ -342,7 +342,7 @@ function refreshStatus(){
   if(setupMissing)return setStatus("The wall is still being set up.");
   if(indexFailed)return setStatus("Can't reach the wall right now. Retrying…");
   if(connecting)return;
-  const parts=[cooldown()?`Next picture in ${waitText()}`:"You can hang 1 picture today"];
+  const parts=["Connected"];
   if(hereNow>1)parts.push(`${hereNow} here now`);
   setStatus(parts.join(" · "));
 }
@@ -408,29 +408,22 @@ function refreshCount(){
   if(total===null)return;
   $("count").textContent=total.toLocaleString("en-US");$("countLabel").textContent=total===1?"image":"images";
 }
-function cooldown(){return Math.max(0,nextAt-Date.now())}
-function waitText(){const m=Math.ceil(cooldown()/6e4),h=Math.floor(m/60);return h?`${h}h ${m%60}m`:`${m}m`}
 function refreshAdd(){
-  const b=$("addBtn"),left=cooldown(),ok=canHang&&!setupMissing;
-  b.disabled=!ok||left>0;
-  b.textContent=ok&&left?`Next picture in ${waitText()}`:"Hang your picture";
-  b.title=!ok?noHangReason():left?"Everyone can hang one picture every 24 hours.":"";
+  const b=$("addBtn"),ok=canHang&&!setupMissing;
+  b.disabled=!ok;
+  b.title=ok?"":noHangReason();
   refreshStatus();updateEmpty();
-}
-async function loadStatus(){
-  const {data,error}=await sb.rpc("dah_status",{p_device:device});
-  if(!error&&num(data)){nextAt=data>0?Date.now()+data*1000:0;refreshAdd()}
 }
 function updateEmpty(){
   const box=$("empty");
   const known=regions.size>0||pieces.size>0;
   const show=!known&&!placing&&(indexReady||setupMissing||!sb);
   box.hidden=!show;
-  $("emptyAdd").hidden=!canHang||setupMissing||cooldown()>0;
+  $("emptyAdd").hidden=!canHang||setupMissing;
   $("emptyText").textContent=setupMissing
     ?"D.A.H. is almost ready. Its database is still being set up, so check back soon."
     :!sb?"The wall couldn't load. Check your connection and reload the page."
-    :"Everyone shares this one wall. Pick a free spot for your picture. You can add one every 24 hours.";
+    :"Everyone shares this one wall. Pick a free spot and hang your picture.";
 }
 
 /* ---------- moving around ---------- */
@@ -512,7 +505,6 @@ function openDetail(id){
   if(mine){
     const rm=el("button",{class:"btn danger",type:"button",text:"Take it down"});
     rm.onclick=()=>{if(rm.dataset.sure){rm.disabled=true;takeDown(p)}else{rm.dataset.sure="1";rm.textContent="Confirm: delete for everyone"}};
-    kids.push(el("p",{class:"note",text:"Taking a picture down doesn't give you another hang today."}));
     kids.push(el("div",{class:"row"},rm));
   }
   if(!mine){
@@ -562,14 +554,11 @@ addEventListener("dragover",e=>{if(hasFiles(e))e.preventDefault()});
 addEventListener("drop",e=>{if(!hasFiles(e))return;e.preventDefault();dragDepth=0;$("dropveil").hidden=true;takeFiles([...e.dataTransfer.files],toWorld(e.clientX,e.clientY))});
 function takeFiles(files,at){
   if(!canHang){toast(noHangReason());return}
-  if(cooldown()){toast(`You've hung today's picture. Your next one is in ${waitText()}.`);return}
-  if(placing){toast("Finish placing this picture first.");return}
   const ok=files.filter(f=>TYPES.has(f.type)&&f.size<=30*1024*1024);
   if(ok.length<files.length)toast("Some files were skipped. Use PNG, JPEG, GIF or WebP up to 30 MB.");
   if(!ok.length)return;
-  if(ok.length>1)toast("You can hang one picture a day, so only the first one was kept.");
-  queue=[{file:ok[0],at}];
-  nextInQueue();
+  queue.push(...ok.map(f=>({file:f,at})));
+  if(placing)buildPlacePanel();else nextInQueue();
 }
 function loadImage(file){return new Promise((res,rej)=>{const url=URL.createObjectURL(file),i=new Image();i.onload=()=>res({img:i,url});i.onerror=()=>{URL.revokeObjectURL(url);rej(new Error("decode"))};i.src=url})}
 async function nextInQueue(){
@@ -630,11 +619,11 @@ function buildPlacePanel(){
   const go=el("button",{id:"hang",class:"btn primary",type:"button",text:"Hang"});
   go.onclick=()=>hang(title.value.trim(),artist.value.trim(),note.value.trim(),dl.checked);
   const warn=el("div",{id:"pw",class:"warn",hidden:true},document.createTextNode("Another piece is already here. "),el("button",{class:"btn",type:"button",text:"Find a free spot",onclick:findFree,style:"margin-top:6px"}));
-  const cancel=el("button",{class:"btn",type:"button",text:"Cancel",onclick:cancelPlacing});
+  const cancel=el("button",{class:"btn",type:"button",text:queue.length?"Skip":"Cancel",onclick:cancelPlacing});
   panel.replaceChildren(
-    el("div",{class:"eyebrow",text:"Today's picture"}),
+    el("div",{class:"eyebrow",text:queue.length?`Your picture · ${queue.length} more after this`:"Your picture"}),
     el("h2",{text:"Choose its spot"}),
-    el("p",{class:"note",text:"Drag it on the map, or type exact coordinates. It can't cover anyone else's art, and you can hang one picture every 24 hours."}),
+    el("p",{class:"note",text:"Drag it on the map, or type exact coordinates. It can't cover anyone else's art."}),
     el("div",{class:"two"},field("x",x),field("y",y)),warn,
     el("label",{class:"field"},sizeLabel,size),
     field("Title",title),field("Artist",artist),field("Note",note),dlRow,
@@ -669,8 +658,7 @@ async function prepare(P){
 function hangError(e){
   if(e&&e.dah)return e.dah;
   const m=(e&&e.message)||"";
-  const lim=/DAH:limit:(\d+)/.exec(m);
-  if(lim){nextAt=Date.now()+Number(lim[1])*1000;refreshAdd();return `You've used today's picture. Your next one is in ${waitText()}.`}
+  if(m.includes("DAH:limit"))return "This wall's upload limit is still switched on. Try again later.";
   if(m.includes("DAH:overlap"))return "Someone else's art is already here, or someone is hanging a picture here right now. Move yours and try again.";
   if(m.includes("DAH:slow"))return "Too many attempts from this network. Wait an hour and try again.";
   if(m.includes("DAH:busy"))return "The wall is very busy right now. Try again soon.";
@@ -699,10 +687,10 @@ async function hang(title,artist,note,dl){
     const pub=await sb.rpc("dah_publish",{p_claim:c.data.claim,p_device:device});
     if(pub.error)throw pub.error;
     const p=clean(pub.data);if(p){pieces.set(p.id,p);addIndex(pub.data)}
-    nextAt=Date.now()+DAY;
     if(placing===P){P.el.remove();URL.revokeObjectURL(P.url);placing=null;closePanel()}
     total=(total||0)+1;refreshCount();refreshAdd();soon();draw();
     toast(`Hung at ${plain(x,y)}.`);
+    nextInQueue();
   }catch(e){done(hangError(e))}
 }
 
@@ -727,7 +715,7 @@ updateEmpty();
     canHang=true;
   }catch{connecting=false;updateEmpty();refreshAdd();setStatus("The wall couldn't load. Reload the page.");return}
   refreshAdd();
-  await Promise.all([loadIndex(),loadCount(),loadStatus()]);
+  await Promise.all([loadIndex(),loadCount()]);
   subscribeLive();syncSubs();
   setInterval(refreshAdd,30000);
   setInterval(()=>{if(indexFailed||setupMissing)loadIndex()},15000);
